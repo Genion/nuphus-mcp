@@ -83,7 +83,7 @@ nuphus-mcp/
 | macOS    | Full          | Desktop input requires Accessibility permission (System Settings → Privacy & Security → Accessibility) |
 | Linux    | Available     | Partial — window/input capabilities are limited |
 
-> **Execution HUD**: non-intrusive execution feedback on every platform — Windows shows an on-screen OSD bar (start + result, real-time), macOS/Linux post a **system notification** on completion (`NUPHUS_MCP_HUD=off` to disable). Window activation is never used as a visibility fallback.
+> **Execution HUD**: non-intrusive execution feedback on every platform — Windows shows a compact status card anchored to the bottom-right of the work area, clear of the taskbar/tray (start / done / fail, real-time, styled after the main app HUD), macOS/Linux post a **system notification** on completion (`NUPHUS_MCP_HUD=off` to disable). Window activation is never used as a visibility fallback.
 
 ## API Keys & Local Models
 
