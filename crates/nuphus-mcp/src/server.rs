@@ -259,11 +259,13 @@ async fn execute_tool_isolated(name: String, args: Value) -> Result<tools::ToolO
     use futures_util::FutureExt;
     let log_name = name.clone();
     let start = std::time::Instant::now();
-    // HUD 可见性协议：执行前显示「▶ 工具+关键参数」，完成后覆盖为结果态。
-    // 桌面操作目标多为其它应用的窗口，激活窗口做提示是灾难——HUD 浮条是唯一实时通道。
+    // HUD 可见性协议：执行前显示「工具名 + 关键参数」，完成后覆盖为结果态。
+    // 状态不用字符图标承载——由 HUD 自己用一枚色点表达（三态：执行中 / 完成 / 失败），
+    // 避免 Agent 侧拼语义字形、也避免各平台通知文本里出现图形符号。
+    // 桌面操作目标多为其它应用的窗口，激活窗口做提示是灾难——HUD 是唯一实时通道。
     desktop_api::hud::show(
         desktop_api::hud::HudKind::Start,
-        format!("▶ {}", desktop_api::hud::tool_summary(&name, &args)),
+        desktop_api::hud::tool_summary(&name, &args),
         desktop_api::hud::HOLD_EXEC_MS,
     );
     let fut = std::panic::AssertUnwindSafe(tools::execute(&name, &args));
@@ -284,17 +286,17 @@ async fn execute_tool_isolated(name: String, args: Value) -> Result<tools::ToolO
     match &result {
         Ok(out) if !out.is_error => desktop_api::hud::show(
             desktop_api::hud::HudKind::Done,
-            format!("✓ {} ({}ms)", name, start.elapsed().as_millis()),
+            format!("{name} · {}ms", start.elapsed().as_millis()),
             desktop_api::hud::HOLD_DONE_MS,
         ),
         Ok(_) => desktop_api::hud::show(
-            desktop_api::hud::HudKind::Done,
-            format!("⚠ {} failed", name),
+            desktop_api::hud::HudKind::Fail,
+            format!("{name} · failed"),
             desktop_api::hud::HOLD_DONE_MS,
         ),
         Err(_) => desktop_api::hud::show(
-            desktop_api::hud::HudKind::Done,
-            format!("✗ {} error", name),
+            desktop_api::hud::HudKind::Fail,
+            format!("{name} · error"),
             desktop_api::hud::HOLD_DONE_MS,
         ),
     }

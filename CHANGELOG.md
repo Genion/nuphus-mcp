@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **执行 HUD 视觉重构**：Windows 端由「右下角黑色文字浮条」改为与主项目 HUD 同源的直角状态卡片
+  —— 3px 相位色条 + 14px 相位图标（转圈 / 对勾 / 感叹号）+ 12.5px 主文与 10px mono 次行
+  + 执行中底部 2px 渐变扫光 + 相位色辉光描边。不再出现类似「告警条 / 全宽横幅」的形态。
+- **HUD 锚点改用工作区**：以 `SPI_GETWORKAREA` 取主显示器工作区右下角定位，避免与任务栏 /
+  托盘区重叠（原先按整屏定位会压住任务栏）。
+- **状态图标改由 HUD 自绘**：Agent 侧不再拼接 `▶ ✓ ⚠ ✗` 字形；`HudKind` 新增 `Fail`
+  变体（失败态使用 error 相位色），macOS / Linux 的完成态通知行为不变。
+
 ## [0.2.2] - 2026-08-30
 
 ### Changed
