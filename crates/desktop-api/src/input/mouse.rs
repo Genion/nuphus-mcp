@@ -139,25 +139,44 @@ pub async fn right_click(x: i32, y: i32) -> Result<()> {
 
 /// Scroll the mouse wheel
 ///
-/// `direction`: "up" / "down"; `amount`: number of wheel notches (each notch = 120 delta).
+/// `direction`: "up" / "down" / "left" / "right"; `amount`: number of wheel
+/// notches (each notch = 120 delta). Ported from the main app's desktop-api
+/// so horizontal scrolling works identically in both products.
 pub async fn scroll(direction: &str, amount: i32) -> Result<()> {
     // Validate before touching any platform API: an unknown direction must be an
-    // error, not a silent "down".
-    let delta: i32 = match direction {
-        "up" => 120,
-        "down" => -120,
+    // error, not a silent "down"; a negative amount is always a caller mistake.
+    match direction {
+        "up" | "down" | "left" | "right" => {}
         other => {
             return Err(DesktopError::InputFailed(format!(
-                "unknown scroll direction: {other} (expected \"up\" or \"down\")"
+                "unknown scroll direction: {other} (expected \"up\", \"down\", \"left\" or \"right\")"
             )));
         }
-    };
+    }
+    if amount < 0 {
+        return Err(DesktopError::InputFailed(
+            "scroll amount must be non-negative".into(),
+        ));
+    }
     #[cfg(windows)]
     {
-        use ::windows::Win32::UI::Input::KeyboardAndMouse::{mouse_event, MOUSEEVENTF_WHEEL};
+        use ::windows::Win32::UI::Input::KeyboardAndMouse::{
+            mouse_event, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL,
+        };
+        // Win32 vertical positive means up; horizontal positive means right.
+        let delta: i32 = if matches!(direction, "up" | "right") {
+            120
+        } else {
+            -120
+        };
+        let flags = if matches!(direction, "left" | "right") {
+            MOUSEEVENTF_HWHEEL
+        } else {
+            MOUSEEVENTF_WHEEL
+        };
         for _ in 0..amount.max(0) {
             unsafe {
-                mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0);
+                mouse_event(flags, 0, 0, delta, 0);
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -165,7 +184,7 @@ pub async fn scroll(direction: &str, amount: i32) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        let _ = (delta, amount);
+        let _ = (direction, amount);
         Err(DesktopError::PlatformNotSupported)
     }
 }

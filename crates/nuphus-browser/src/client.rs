@@ -3295,26 +3295,43 @@ impl BrowserClient {
         let page = self.get_page().await?;
         let page_guard = page.lock().await;
 
-        let js = format!(
-            r#"
-            (function() {{
-                // Try to get main content
-                const article = document.querySelector('article');
-                const main = document.querySelector('main');
-                const content = document.querySelector('[class*="content"]');
-                const body = document.body;
-                
+        // Main-content pickers, tried in order. The first picker whose innerText
+        // is NON-EMPTY wins; an empty match (SPA shell, placeholder <article>)
+        // falls through to the next candidate instead of returning nothing.
+        // Deeper structural hints ([role=main], itemprop) rank before the loose
+        // [class*="content"] substring match, which frequently catches sidebars
+        // and comment widgets.
+        let js = r#"
+            (function() {
+                const pickers = [
+                    'article',
+                    'main',
+                    '[role="main"]',
+                    '[itemprop="mainContent"]',
+                    '[class*="content"]',
+                ];
+                // Noise subtrees removed BEFORE reading innerText so their text
+                // (nav links, cookie banners, footers) never enters the extract.
+                const noise = 'nav, aside, footer, script, style, noscript, svg';
+                document.querySelectorAll(noise).forEach((el) => el.remove());
+
                 let text = '';
-                if (article) text = article.innerText;
-                else if (main) text = main.innerText;
-                else if (content) text = content.innerText;
-                else text = body.innerText;
-                
-                return text.substring(0, {}).replace(/\s+/g, ' ').trim();
-            }})()
-            "#,
-            max_chars
-        );
+                for (const sel of pickers) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        const t = el.innerText;
+                        if (t && t.trim().length > 0) {
+                            text = t;
+                            break;
+                        }
+                    }
+                }
+                if (!text) text = document.body.innerText;
+
+                return text.substring(0, MAX_CHARS).replace(/\s+/g, ' ').trim();
+            })()
+        "#
+        .replace("MAX_CHARS", &max_chars.to_string());
 
         let result = cdp(page_guard.evaluate(js)).await?;
 

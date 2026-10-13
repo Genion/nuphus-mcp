@@ -318,11 +318,13 @@ pub async fn vision_image(image_path: &str, prompt: Option<&str>) -> Result<Stri
         .map_err(|e| format!("vision API request failed: {}", e))?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
         let err_body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "vision API ({}) returned HTTP {status}: {err_body}",
-            config.provider.label()
+        return Err(format_vision_error(
+            config.provider.label(),
+            &config.model,
+            Some(status),
+            &err_body,
         ));
     }
 
@@ -339,10 +341,280 @@ pub async fn vision_image(image_path: &str, prompt: Option<&str>) -> Result<Stri
     }
 }
 
+// ══════════════════════════════════════════════
+// Failure classification & single-layer error copy
+// (synced from the main crate's `src/desktop/vision_ocr.rs` — same keyword
+// tables and priority order, so a failure reads the same in both products)
+// ══════════════════════════════════════════════
+
+/// Failure kinds for a vision API call — pure status/keyword matching, no extra deps.
+///
+/// The kind decides the "way out" sentence in the final copy. Note that the
+/// keyword tables below intentionally match the main crate verbatim: OpenAI's
+/// `insufficient_quota` arrives as HTTP 429, but retrying is pointless — it must
+/// classify as Billing, which is why billing keywords outrank the 429 status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisionErrorKind {
+    /// API key invalid / unauthorized — retrying is pointless
+    Auth,
+    /// Out of balance / quota exhausted — retrying is pointless
+    Billing,
+    /// Rate limited / overloaded — retrying later is meaningful
+    RateLimit,
+    /// Image too large / format rejected
+    ImageTooLarge,
+    /// Anything else (network fault, unknown, empty body, …)
+    Other,
+}
+
+/// Billing keywords. Take precedence over HTTP 429 (see enum docs).
+const BILLING_KEYWORDS: &[&str] = &[
+    "余额不足",
+    "余额",
+    "充值",
+    "资源包",
+    "欠费",
+    "配额已用尽",
+    "配额耗尽",
+    "insufficient_quota",
+    "insufficient balance",
+    "exceeded your current quota",
+    "quota exceeded",
+    "billing",
+    "balance",
+];
+
+/// Auth keywords.
+const AUTH_KEYWORDS: &[&str] = &[
+    "invalid api key",
+    "incorrect api key",
+    "api key not valid",
+    "invalid_api_key",
+    "unauthorized",
+    "authentication",
+    "鉴权失败",
+    "密钥无效",
+    "无效的密钥",
+    "密钥错误",
+    "令牌无效",
+    "access denied",
+];
+
+/// Rate-limit keywords.
+const RATE_LIMIT_KEYWORDS: &[&str] = &[
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+    "请求过于频繁",
+    "限流",
+    "触发频率限制",
+    "requests per min",
+];
+
+/// Image-too-large keywords.
+const IMAGE_TOO_LARGE_KEYWORDS: &[&str] = &[
+    "image too large",
+    "图片过大",
+    "图片太大",
+    "payload too large",
+    "request entity too large",
+    "file too large",
+    "max image size",
+    "image size exceeds",
+];
+
+fn body_contains(body_lower: &str, keywords: &[&str]) -> bool {
+    keywords.iter().any(|k| body_lower.contains(k))
+}
+
+/// Classify a vision API failure from HTTP status + body (pure function).
+///
+/// Match order = semantic priority:
+/// 1. billing keywords (429 + insufficient_quota is billing, NOT rate limit)
+/// 2. HTTP 401/403 → auth
+/// 3. auth keywords
+/// 4. HTTP 429 / rate-limit keywords
+/// 5. HTTP 413 / image-too-large keywords
+/// 6. other
+pub fn classify_vision_error(status: Option<u16>, body: &str) -> VisionErrorKind {
+    let body_lower = body.to_lowercase();
+    if body_contains(&body_lower, BILLING_KEYWORDS) {
+        return VisionErrorKind::Billing;
+    }
+    if matches!(status, Some(401) | Some(403)) {
+        return VisionErrorKind::Auth;
+    }
+    if body_contains(&body_lower, AUTH_KEYWORDS) {
+        return VisionErrorKind::Auth;
+    }
+    if status == Some(429) || body_contains(&body_lower, RATE_LIMIT_KEYWORDS) {
+        return VisionErrorKind::RateLimit;
+    }
+    if status == Some(413) || body_contains(&body_lower, IMAGE_TOO_LARGE_KEYWORDS) {
+        return VisionErrorKind::ImageTooLarge;
+    }
+    VisionErrorKind::Other
+}
+
+/// Discriminator phrases embedded by [`format_vision_error`] — shared with
+/// [`classify_vision_error_text`] so the format → classify round trip is stable.
+///
+/// The phrase is what any downstream banner/classifier keys on; raw error bodies
+/// carrying quota/balance wording inside rate-limit/other copy cannot hijack the
+/// classification because the phrase outranks keyword matching.
+const TEMPLATE_PHRASE_AUTH: &str = "API 密钥无效或未授权";
+const TEMPLATE_PHRASE_BILLING: &str = "账户余额不足或配额已用尽";
+const TEMPLATE_PHRASE_RATE_LIMIT: &str = "请求被限流";
+const TEMPLATE_PHRASE_IMAGE_TOO_LARGE: &str = "图片过大或格式不被接受";
+
+/// Classify the FINAL single-layer error text (downstream tooling keys on the
+/// discriminator phrase first, then falls back to [`classify_vision_error`]).
+pub fn classify_vision_error_text(text: &str) -> VisionErrorKind {
+    if text.contains(TEMPLATE_PHRASE_AUTH) {
+        return VisionErrorKind::Auth;
+    }
+    if text.contains(TEMPLATE_PHRASE_BILLING) {
+        return VisionErrorKind::Billing;
+    }
+    if text.contains(TEMPLATE_PHRASE_RATE_LIMIT) {
+        return VisionErrorKind::RateLimit;
+    }
+    if text.contains(TEMPLATE_PHRASE_IMAGE_TOO_LARGE) {
+        return VisionErrorKind::ImageTooLarge;
+    }
+    classify_vision_error(None, text)
+}
+
+/// Assemble the final single-layer error copy: one sentence carrying
+/// [provider+model] + [failure class] + [way out]. The returned string is the
+/// final text — callers must not prepend anything (it flows straight into the
+/// calling Agent's context, so it must be complete and truthful).
+pub fn format_vision_error(
+    provider_label: &str,
+    model: &str,
+    status: Option<u16>,
+    raw_detail: &str,
+) -> String {
+    let kind = classify_vision_error(status, raw_detail);
+    let who = format!("视觉模型 {model}（{provider_label}）");
+    let detail = raw_detail.trim();
+    let detail = if detail.is_empty() {
+        match status {
+            Some(s) => format!("HTTP {s}"),
+            None => "无详细信息".to_string(),
+        }
+    } else {
+        match status {
+            Some(s) => format!("HTTP {s}：{detail}"),
+            None => detail.to_string(),
+        }
+    };
+    match kind {
+        VisionErrorKind::Auth => format!(
+            "图像理解调用失败（{who}）：{TEMPLATE_PHRASE_AUTH}。{detail}。\
+             出路：检查 NUPHUS_MCP_VISION_API_KEY 是否有效、是否配到了正确的服务商，修复后重试。"
+        ),
+        VisionErrorKind::Billing => format!(
+            "图像理解调用失败（{who}）：{TEMPLATE_PHRASE_BILLING}。{detail}。\
+             出路：到该服务商控制台充值或购买资源包后重试；\
+             修复前图片理解类操作将持续失败，请如实告知用户，不要推测图像内容。"
+        ),
+        VisionErrorKind::RateLimit => format!(
+            "图像理解调用失败（{who}）：{TEMPLATE_PHRASE_RATE_LIMIT}。{detail}。\
+             出路：瞬时限制，稍等数十秒重试即可，无需改配置。"
+        ),
+        VisionErrorKind::ImageTooLarge => format!(
+            "图像理解调用失败（{who}）：{TEMPLATE_PHRASE_IMAGE_TOO_LARGE}。{detail}。\
+             出路：压缩或裁剪图片后重试。"
+        ),
+        VisionErrorKind::Other => format!(
+            "图像理解调用失败（{who}）。{detail}。\
+             出路：可稍后重试；若持续失败请检查 NUPHUS_MCP_VISION_BASE_URL/MODEL 配置与服务商状态。"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    // ---- Failure classification (format → classify round trip) ----
+
+    #[test]
+    fn billing_keywords_outrank_http_429() {
+        // OpenAI's insufficient_quota arrives as 429 but must be Billing.
+        assert_eq!(
+            classify_vision_error(
+                Some(429),
+                "insufficient_quota: you have exceeded your quota"
+            ),
+            VisionErrorKind::Billing
+        );
+        // Chinese gateway billing body (the workbuddy.ai case).
+        assert_eq!(
+            classify_vision_error(Some(429), "账户余额不足，请充值后重试"),
+            VisionErrorKind::Billing
+        );
+    }
+
+    #[test]
+    fn status_codes_map_to_kinds() {
+        assert_eq!(classify_vision_error(Some(401), ""), VisionErrorKind::Auth);
+        assert_eq!(classify_vision_error(Some(403), ""), VisionErrorKind::Auth);
+        assert_eq!(
+            classify_vision_error(Some(429), "too many requests"),
+            VisionErrorKind::RateLimit
+        );
+        assert_eq!(
+            classify_vision_error(Some(413), "request entity too large"),
+            VisionErrorKind::ImageTooLarge
+        );
+        assert_eq!(
+            classify_vision_error(Some(500), "internal server error"),
+            VisionErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn format_classify_round_trip_is_hijack_proof() {
+        // Each kind's formatted copy must classify back to the same kind even
+        // when the embedded raw body carries a DIFFERENT kind's keywords.
+        for (status, body) in [
+            (Some(401), "unauthorized"),
+            (Some(429), "insufficient_quota"),
+            (Some(429), "rate limit exceeded, retry after 30s"),
+            (Some(413), "image too large"),
+            (Some(500), "upstream connect error"),
+        ] {
+            let text = format_vision_error("openai", "test-model", status, body);
+            assert_eq!(
+                classify_vision_error_text(&text),
+                classify_vision_error(status, body),
+                "round trip failed for {status:?} {body}: {text}"
+            );
+        }
+        // Hostile case: a rate-limit body containing quota wording inside the
+        // raw detail must still classify as RateLimit via the phrase.
+        let hostile = format_vision_error(
+            "openai",
+            "m",
+            Some(429),
+            "rate limited; your quota resets in 60s",
+        );
+        assert_eq!(
+            classify_vision_error_text(&hostile),
+            VisionErrorKind::RateLimit
+        );
+    }
+
+    #[test]
+    fn error_copy_carries_model_and_way_out() {
+        let text = format_vision_error("openai", "gpt-4o-mini", Some(401), "invalid api key");
+        assert!(text.contains("gpt-4o-mini"), "{text}");
+        assert!(text.contains("openai"), "{text}");
+        assert!(text.contains("NUPHUS_MCP_VISION_API_KEY"), "{text}");
+    }
 
     /// Env var mutations are global within the test process; serialize to avoid parallel tests polluting each other.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {

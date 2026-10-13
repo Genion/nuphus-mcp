@@ -12,6 +12,71 @@ use serde_json::{json, Value};
 
 use super::semantic;
 
+// ─────────────────────────── capture registry ───────────────────────────
+// perceive → click fool-proofing: every screen-space desktop_perceive run is
+// registered here under an unguessable capture_id with the ALREADY-TRANSLATED
+// screen-space centers. desktop_mouse / desktop_mouse_drag can then act via
+// capture_id + element_id instead of trusting caller-supplied raw coordinates.
+// The last 8 captures are kept (FIFO); everything older is rejected as stale.
+
+/// Cap on retained captures. perceive is cheap; re-running it is always the
+/// recovery for a stale id — no eviction notice needed in the error copy.
+const CAPTURE_REGISTRY_CAP: usize = 8;
+
+struct CapturedElements {
+    /// element id → screen-space center (translated at registration time, so
+    /// mouse never re-derives coordinates from image pixels)
+    centers: std::collections::HashMap<u32, (i32, i32)>,
+}
+
+fn capture_registry(
+) -> &'static std::sync::Mutex<std::collections::VecDeque<(String, CapturedElements)>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<(String, CapturedElements)>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// Register a screen-space perceive result; returns its capture_id.
+fn capture_register(output: &desktop_api::vision::perceive::PerceiveOutput) -> String {
+    let centers: std::collections::HashMap<u32, (i32, i32)> = output
+        .elements
+        .iter()
+        .map(|el| (el.id, (el.rect.center().x, el.rect.center().y)))
+        .collect();
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut registry = capture_registry()
+        .lock()
+        .expect("capture registry poisoned");
+    while registry.len() >= CAPTURE_REGISTRY_CAP {
+        registry.pop_front();
+    }
+    registry.push_back((id.clone(), CapturedElements { centers }));
+    id
+}
+
+/// Resolve capture_id + element_id into the registered screen-space center.
+fn capture_resolve(capture_id: &str, element_id: u32) -> Result<(i32, i32), String> {
+    let registry = capture_registry()
+        .lock()
+        .expect("capture registry poisoned");
+    let (_, captured) = registry
+        .iter()
+        .find(|(id, _)| id == capture_id)
+        .ok_or_else(|| {
+            "capture_id is unknown or stale (only the last 8 captures are retained) — re-run desktop_perceive and use the fresh capture_id".to_string()
+        })?;
+    captured
+        .centers
+        .get(&element_id)
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "element_id {element_id} does not exist in capture {capture_id} — read the ids from the latest desktop_perceive result"
+            )
+        })
+}
+
 /// Execute a desktop_* tool, returning a text result.
 pub async fn execute(name: &str, args: &Value) -> Result<String, String> {
     match name {
@@ -341,6 +406,12 @@ async fn perceive(args: &Value) -> Result<String, String> {
     .map_err(|e| format!("perceive worker panicked: {}", e))?
     .map_err(|e| format!("perceive failed: {}", e))?;
 
+    // Screen-space runs get a capture_id: desktop_mouse/desktop_mouse_drag can
+    // then act via capture_id + element_id on the registered screen-space
+    // centers instead of raw caller coordinates (fool-proofing against clicking
+    // image coordinates directly).
+    let capture_id = geometry.as_ref().map(|_| capture_register(&output));
+
     let json_elements: Vec<Value> = output
         .elements
         .iter()
@@ -381,6 +452,9 @@ async fn perceive(args: &Value) -> Result<String, String> {
         "models_dir": status.dir.display().to_string(),
         "coordinate_space": coordinate_space,
     });
+    if let Some(capture_id) = capture_id {
+        result["capture_id"] = json!(capture_id);
+    }
     if let Some(geometry) = geometry {
         result["geometry"] = json!({
             "x": geometry.x,
@@ -448,17 +522,39 @@ async fn mouse(args: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "action is required".to_string())?;
-    // Coordinate-carrying actions must fail loudly when x/y are missing —
+    // Coordinate-carrying actions must fail loudly when coordinates are missing —
     // defaulting to (0,0) clicks/moves at the top-left screen corner by mistake.
     let needs_xy = matches!(action, "move" | "hover" | "click" | "double_click");
     let x = args.get("x").and_then(Value::as_i64).map(|v| v as i32);
     let y = args.get("y").and_then(Value::as_i64).map(|v| v as i32);
-    if needs_xy && (x.is_none() || y.is_none()) {
-        return Err(format!(
-            "x and y are required for action={action} (got x={x:?}, y={y:?})"
-        ));
-    }
-    let (x, y) = (x.unwrap_or(0), y.unwrap_or(0));
+    // capture_id + element_id reference a registered perceive result; mutually
+    // exclusive with raw x/y (mixing them is always a caller mistake).
+    let capture_id = args.get("capture_id").and_then(Value::as_str);
+    let element_id = args.get("element_id").and_then(Value::as_u64);
+    let (x, y) = if needs_xy {
+        match (capture_id, element_id, x, y) {
+            (Some(cid), Some(eid), None, None) => capture_resolve(cid, eid as u32)?,
+            (Some(_), Some(_), _, _) => {
+                return Err(
+                    "capture_id + element_id cannot be combined with x/y — provide either pair"
+                        .to_string(),
+                )
+            }
+            (None, None, Some(x), Some(y)) => (x as i32, y as i32),
+            (None, None, _, _) => {
+                return Err(format!(
+                    "x and y are required for action={action} (got x={x:?}, y={y:?}); or pass capture_id + element_id from desktop_perceive"
+                ))
+            }
+            (Some(_), None, _, _) | (None, Some(_), _, _) => {
+                return Err(
+                    "capture_id and element_id must be provided together".to_string()
+                )
+            }
+        }
+    } else {
+        (x.unwrap_or(0), y.unwrap_or(0))
+    };
 
     match action {
         "position" => {
@@ -520,22 +616,49 @@ async fn mouse(args: &Value) -> Result<String, String> {
 }
 
 async fn mouse_drag(args: &Value) -> Result<String, String> {
-    let start_x = args
-        .get("start_x")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "start_x required".to_string())? as i32;
-    let start_y = args
-        .get("start_y")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "start_y required".to_string())? as i32;
-    let end_x = args
-        .get("end_x")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "end_x required".to_string())? as i32;
-    let end_y = args
-        .get("end_y")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "end_y required".to_string())? as i32;
+    // Endpoint pairs: capture_id + element_id (registered perceive result) or raw
+    // x/y — mutually exclusive per endpoint, never mixed across endpoints.
+    let start_capture = args.get("start_capture_id").and_then(Value::as_str);
+    let start_element = args.get("start_element_id").and_then(Value::as_u64);
+    let end_capture = args.get("end_capture_id").and_then(Value::as_str);
+    let end_element = args.get("end_element_id").and_then(Value::as_u64);
+    let start_x = args.get("start_x").and_then(Value::as_i64);
+    let start_y = args.get("start_y").and_then(Value::as_i64);
+    let end_x = args.get("end_x").and_then(Value::as_i64);
+    let end_y = args.get("end_y").and_then(Value::as_i64);
+
+    let (start, end) = match ((start_capture, start_element), (end_capture, end_element)) {
+        ((Some(cid), Some(eid)), (Some(cid2), Some(eid2))) => {
+            if start_x.is_some() || start_y.is_some() || end_x.is_some() || end_y.is_some() {
+                return Err(
+                    "capture_id pairs cannot be combined with raw x/y coordinates".to_string(),
+                );
+            }
+            (
+                capture_resolve(cid, eid as u32)?,
+                capture_resolve(cid2, eid2 as u32)?,
+            )
+        }
+        ((Some(_), Some(_)), _) | (_, (Some(_), Some(_))) => {
+            return Err("both endpoints need their full capture_id + element_id pair".to_string())
+        }
+        ((None, None), (None, None)) => {
+            let (Some(sx), Some(sy), Some(ex), Some(ey)) = (start_x, start_y, end_x, end_y) else {
+                return Err(
+                    "drag endpoints required: start_capture_id + start_element_id and end_capture_id + end_element_id, or start_x/start_y + end_x/end_y"
+                        .to_string(),
+                );
+            };
+            ((sx as i32, sy as i32), (ex as i32, ey as i32))
+        }
+        _ => {
+            return Err(
+                "each endpoint must be either a full capture pair or full x/y — never mixed"
+                    .to_string(),
+            )
+        }
+    };
+    let ((start_x, start_y), (end_x, end_y)) = (start, end);
     input::mouse::drag(
         desktop_api::Point {
             x: start_x,
@@ -671,4 +794,71 @@ async fn clipboard_write(args: &Value) -> Result<String, String> {
     desktop_api::clipboard::write_text(text)
         .map_err(|e| format!("clipboard write failed: {}", e))?;
     Ok(json!({ "written_chars": text.chars().count() }).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desktop_api::vision::perceive::{ElementSource, PerceiveOutput, UiElement};
+    use desktop_api::vision::ElementKind;
+
+    fn fake_output(count: u32) -> PerceiveOutput {
+        let elements = (0..count)
+            .map(|i| UiElement {
+                id: i,
+                kind: ElementKind::Button,
+                text: Some(format!("el{i}")),
+                rect: desktop_api::Rect {
+                    x: i as i32 * 10,
+                    y: i as i32 * 10,
+                    w: 10,
+                    h: 10,
+                },
+                confidence: 0.9,
+                source: ElementSource::Ocr,
+            })
+            .collect();
+        PerceiveOutput {
+            elements,
+            ocr_count: count as usize,
+            yolo_count: 0,
+            yolo_available: false,
+        }
+    }
+
+    #[test]
+    fn register_then_resolve_returns_screen_center() {
+        let output = fake_output(3);
+        let id = capture_register(&output);
+        let (x, y) = capture_resolve(&id, 1).expect("element 1 must resolve");
+        // element 1's image center is (15, 15) — registration stores what it is
+        // given (translation happens upstream in perceive), no re-derivation.
+        assert_eq!((x, y), (15, 15));
+    }
+
+    #[test]
+    fn unknown_capture_id_is_rejected_with_recovery_hint() {
+        let err = capture_resolve("no-such-capture", 0).expect_err("must fail");
+        assert!(err.contains("desktop_perceive"), "{err}");
+    }
+
+    #[test]
+    fn unknown_element_id_is_rejected_named() {
+        let id = capture_register(&fake_output(2));
+        let err = capture_resolve(&id, 99).expect_err("must fail");
+        assert!(err.contains("99") && err.contains(&id), "{err}");
+    }
+
+    #[test]
+    fn registry_evicts_oldest_beyond_cap() {
+        let mut first_id = String::new();
+        for i in 0..(CAPTURE_REGISTRY_CAP + 2) {
+            let id = capture_register(&fake_output(1));
+            if i == 0 {
+                first_id = id;
+            }
+        }
+        // The very first capture fell out of the FIFO window.
+        assert!(capture_resolve(&first_id, 0).is_err());
+    }
 }

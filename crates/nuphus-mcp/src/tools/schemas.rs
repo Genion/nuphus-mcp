@@ -206,7 +206,7 @@ fn desktop_tools() -> Vec<ToolDef> {
         ),
         tool_def(
             "desktop_perceive",
-            "Locate UI elements via local OCR (PaddleOCR) + optional YOLO; auto-downloads OCR models on first run. Returns rect{x,y,w,h} + center{x,y} in SCREEN coordinates when it captures the screen itself (region narrows what is captured), or in image coordinates when path is given; ALWAYS click center, never rect.x/y. OCR text may be inaccurate — trust desktop_vision.",
+            "Locate UI elements via local OCR (PaddleOCR) + optional YOLO; auto-downloads OCR models on first run. Returns rect{x,y,w,h} + center{x,y} in SCREEN coordinates when it captures the screen itself (region narrows what is captured) together with a capture_id — pass capture_id + element_id to desktop_mouse/desktop_mouse_drag to act on the registered center; or in image coordinates when path is given (no capture_id; never feed these to the mouse directly). OCR text may be inaccurate — trust desktop_vision.",
             json_props! {
                 "path" => obj!("type"="string","description"="Image file path (PNG); omit to capture the screen first"),
                 "region" => obj!("type"="object","description"="Area to capture and analyse {x,y,width,height}; omit for the full screen. Mutually exclusive with path"),
@@ -215,40 +215,46 @@ fn desktop_tools() -> Vec<ToolDef> {
         ),
         tool_def(
             "desktop_mouse",
-            "Mouse operations: click/double_click/hover/scroll/move require (x,y). position is read-only and returns the current cursor (x,y) without moving it.",
+            "Mouse operations: click/double_click/hover/move require coordinates — either raw screen x/y, or capture_id + element_id from a recent screen-space desktop_perceive (recommended: the server then clicks the registered center, eliminating image-vs-screen coordinate mistakes). position is read-only and returns the current cursor (x,y) without moving it.",
             json_props! {
                 "action" => obj!("type"="string","enum"=["click","double_click","hover","scroll","position","move"],"description"="What to do"),
-                "x" => obj!("type"="integer","description"="X coordinate"),
-                "y" => obj!("type"="integer","description"="Y coordinate"),
+                "x" => obj!("type"="integer","description"="Screen X coordinate (alternative to capture_id+element_id)"),
+                "y" => obj!("type"="integer","description"="Screen Y coordinate (alternative to capture_id+element_id)"),
+                "capture_id" => obj!("type"="string","description"="capture_id from a recent screen-space desktop_perceive; requires element_id; exclusive with x/y"),
+                "element_id" => obj!("type"="integer","description"="Element id from the same desktop_perceive result; requires capture_id; exclusive with x/y"),
                 "button" => obj!("type"="string","enum"=["left","right","middle"],"description"="Mouse button (click)"),
                 "clicks" => obj!("type"="integer","default"=1,"description"="Number of clicks (click)"),
-                "direction" => obj!("type"="string","enum"=["up","down"],"description"="Scroll direction (scroll)"),
+                "direction" => obj!("type"="string","enum"=["up","down","left","right"],"description"="Scroll direction (scroll)"),
                 "amount" => obj!("type"="integer","default"=3,"description"="Scroll ticks (scroll)")
             },
             &["action"],
         ),
         tool_def(
             "desktop_mouse_drag",
-            "Drag the mouse from start to end coordinates (e.g. CAPTCHA sliders).",
+            "Drag the mouse from start to end (e.g. CAPTCHA sliders). Endpoints: either raw screen x/y, or start_capture_id + start_element_id / end_capture_id + end_element_id pairs from a recent screen-space desktop_perceive — never mixed.",
             json_props! {
-                "start_x" => obj!("type"="integer","description"="Start X coordinate"),
-                "start_y" => obj!("type"="integer","description"="Start Y coordinate"),
-                "end_x" => obj!("type"="integer","description"="End X coordinate"),
-                "end_y" => obj!("type"="integer","description"="End Y coordinate")
+                "start_x" => obj!("type"="integer","description"="Start X coordinate (alternative to start capture pair)"),
+                "start_y" => obj!("type"="integer","description"="Start Y coordinate (alternative to start capture pair)"),
+                "end_x" => obj!("type"="integer","description"="End X coordinate (alternative to end capture pair)"),
+                "end_y" => obj!("type"="integer","description"="End Y coordinate (alternative to end capture pair)"),
+                "start_capture_id" => obj!("type"="string","description"="capture_id from a recent screen-space desktop_perceive for the drag start; requires start_element_id; exclusive with start_x/start_y"),
+                "start_element_id" => obj!("type"="integer","description"="Element id from the same desktop_perceive result for the drag start; requires start_capture_id"),
+                "end_capture_id" => obj!("type"="string","description"="capture_id for the drag end; requires end_element_id; exclusive with end_x/end_y"),
+                "end_element_id" => obj!("type"="integer","description"="Element id from the same desktop_perceive result for the drag end; requires end_capture_id")
             },
-            &["start_x", "start_y", "end_x", "end_y"],
+            &[],
         ),
         tool_def(
             "desktop_input",
-            "Type text into a window (UTF-8), optionally with a follow-up key. Use clipboard for >500 chars. Activate the target window first.",
+            "Type text into a window (UTF-8), optionally with a follow-up key. Use clipboard for >500 chars. hwnd omitted → the current foreground window is targeted (activate the right window first).",
             json_props! {
                 "mode" => obj!("type"="string","enum"=["type","hotkey"],"description"="type: input text; hotkey: press keys only"),
-                "hwnd" => obj!("type"="integer","description"="Target window handle. Get from desktop_windows_list."),
+                "hwnd" => obj!("type"="integer","description"="Target window handle from desktop_windows_list; omit to use the current foreground window"),
                 "text" => obj!("type"="string","description"="Text to type (mode=type required)"),
                 "send" => obj!("type"="string","description"="Key to send after typing: \"enter\" (default), \"ctrl+enter\", \"tab\", or \"none\" to skip."),
                 "keys" => obj!("type"="array","items"=obj!("type"="string"),"description"="Key combo to press (mode=hotkey required)")
             },
-            &["mode", "hwnd"],
+            &["mode"],
         ),
         tool_def(
             "desktop_clipboard_clean",
@@ -444,16 +450,16 @@ fn browser_tools() -> Vec<ToolDef> {
         ),
         tool_def(
             "browser_scroll",
-            "Scroll page up/down by N pixels.",
+            "Scroll page up/down/left/right by N pixels.",
             json_props! {
-                "direction" => obj!("type"="string","enum"=["up","down"],"description"="Scroll direction"),
+                "direction" => obj!("type"="string","enum"=["up","down","left","right"],"description"="Scroll direction"),
                 "amount" => obj!("type"="integer","default"=500,"description"="Pixels to scroll")
             },
             &["direction"],
         ),
         tool_def(
             "browser_extract",
-            "Extract readable text from current page (strips nav/ads).",
+            "Get visible text of the CURRENT page (after navigate/click), flattened to one line. Noise (nav/aside/footer/script/style) is removed before reading; scope is 5 pickers tried in order: article → main → [role=main] → [itemprop=mainContent] → [class*=content] → body, first NON-EMPTY match wins (empty pickers fall through, so SPA shells degrade to body instead of returning nothing). For readable CONTENT from a known URL prefer web_extract; for element structure use browser_snapshot. Capture output via browser_exec + h.extract(sel) when a specific selector is known.",
             json_props! {
                 "max_chars" => obj!("type"="integer","default"=8000,"description"="Max characters to extract")
             },
@@ -461,11 +467,11 @@ fn browser_tools() -> Vec<ToolDef> {
         ),
         tool_def(
             "browser_screenshot",
-            "Screenshot the current browser page and save it as a PNG file.",
+            "Screenshot the current browser page. With `path` saves a PNG to disk (path validated); without `path` returns a base64 data URI for inline reading.",
             json_props! {
-                "path" => obj!("type"="string","minLength"=1,"description"="Save path for the PNG file; the parent directory must exist")
+                "path" => obj!("type"="string","description"="Optional save path for the PNG file (parent directory must exist); omit to get a base64 data URI instead")
             },
-            &["path"],
+            &[],
         ),
         tool_def(
             "browser_close",
@@ -707,15 +713,18 @@ mod tests {
     }
 
     #[test]
-    fn browser_screenshot_schema_matches_save_only_runtime() {
+    fn browser_screenshot_schema_matches_dual_mode_runtime() {
         let tool = all_tools()
             .into_iter()
             .find(|tool| tool.name == "browser_screenshot")
             .expect("missing browser_screenshot schema");
 
-        assert_eq!(tool.input_schema["required"], json!(["path"]));
-        assert_eq!(tool.input_schema["properties"]["path"]["minLength"], 1);
-        assert!(tool.description.contains("save"));
+        // path is optional: present → save to disk; absent → inline base64.
+        assert_eq!(tool.input_schema["required"], json!([]));
+        assert!(tool.input_schema["properties"]["path"]
+            .get("minLength")
+            .is_none());
+        assert!(tool.description.contains("base64"));
     }
 
     #[test]

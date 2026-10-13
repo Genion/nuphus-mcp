@@ -454,14 +454,17 @@ async fn run_op(
         }
         "browser_screenshot" => {
             let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+            // Empty path → return a base64 data URI (same contract as the main
+            // app, whose client returns inline base64 when no path is given) so
+            // the calling Agent can read the image inline; a non-empty path is
+            // validated and saved to disk.
             if path.is_empty() {
-                return Err(BrowserError::Execution(
-                    "browser_screenshot: path parameter is required".to_string(),
-                ));
+                client.screenshot(None).await?
+            } else {
+                let validated = crate::security::validate_screenshot_path(path)
+                    .map_err(BrowserError::Execution)?;
+                client.screenshot(Some(&validated)).await?
             }
-            let validated =
-                crate::security::validate_screenshot_path(path).map_err(BrowserError::Execution)?;
-            client.screenshot(Some(&validated)).await?
         }
         "browser_extract" => {
             let max_chars = args
