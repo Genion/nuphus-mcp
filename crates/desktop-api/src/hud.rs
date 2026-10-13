@@ -11,8 +11,13 @@
 //! - 开关：环境变量 `NUPHUS_MCP_HUD=off` 一键禁用（默认开启）
 //!
 //! 视觉约束（大王定调，2026-09-17）：HUD 不得呈「警告条 / 全宽横幅」形态。
+//! 尺寸定档（2026-10-12 二轮）：比初版大一点保证醒目，但克守在精巧区间——
+//! 眉标 10px / 主文 13.5px / 次行 11px / 图标 18px / 卡片 68px 高。
+//! 卡片**实色不透明**（弃玻璃磨砂：整窗 alpha 255，不再叠桌面）。
+//! 品牌**做眉标不做浮动字标**：`Nuphus MCP` 小号弱灰钉在主文上方，与主文/次行共用
+//! 左对齐轴线；右侧只留右内边距，不再放孤立文字。
 //! 样式**对齐主项目 HUD**（`frontend/src/hud/App.tsx` 的 Void & Spark token）：
-//! 直角卡片 + 左侧 3px 相位色条 + 14px 相位图标 + 12.5px 主文 / 10px mono 次行 +
+//! 直角实色卡片 + 左侧 3px 相位色条 + 18px 相位图标 + 三行（眉标 / 主文 / mono 次行）+
 //! 执行中底部 2px 渐变扫光 + 相位色辉光描边。绝不用整块饱和填充或分段进度条。
 
 use serde_json::Value;
@@ -155,33 +160,38 @@ mod imp {
     const ANIM_TIMER_ID: usize = 2;
     const ANIM_STEP_MS: u32 = 60;
 
-    // ── 卡片整体（对齐主项目 .hud-root：直角、rgba(15,15,20,.85)、1px 描边 + 相位辉光） ──
-    const CARD_H: i32 = 52;
-    const CARD_MIN_W: i32 = 200;
-    const CARD_MAX_W: i32 = 420;
+    // ── 卡片整体（对齐主项目 .hud-root：直角实色 #0F0F14、1px 描边 + 相位辉光） ──
+    /// 尺寸定档（2026-10-12 二轮）：比初版大一点保醒目，克守在精巧区间不笨重
+    const CARD_H: i32 = 68;
+    const CARD_MIN_W: i32 = 240;
+    const CARD_MAX_W: i32 = 520;
     const MARGIN: i32 = 20;
-    /// 0.85 不透明度（与主项目 --hud-bg 一致）
-    const ALPHA: u8 = 217;
+    /// 255 = 实色不透明（弃玻璃磨砂：半透明会让小字发虚，叠桌面还显脏）
+    const ALPHA: u8 = 255;
     /// 入场淡入步数（60ms × 5 ≈ 主项目 hudEnter 0.2s 的观感）
     const FADE_IN_STEPS: u32 = 5;
 
-    // ── 几何（对齐主项目：3px 色条 / 20px 图标盒 / 12px 右内边距） ──
+    // ── 几何（精巧档：3px 色条 / 26px 图标盒 / 12px 右内边距） ──
     const BAR_W: i32 = 3;
-    const BAR_H: i32 = 26;
-    const ICON_BOX: i32 = 20;
-    const ICON_SIZE: i32 = 14;
+    const BAR_H: i32 = 32;
+    const ICON_BOX: i32 = 26;
+    const ICON_SIZE: i32 = 18;
     const PAD_RIGHT: i32 = 12;
     const GAP_ICON_TEXT: i32 = 8;
     const PROGRESS_H: i32 = 2;
 
     // ── 配色（COLORREF = 0x00BBGGRR；取自主项目 HUD dark token） ──
-    /// `rgba(15,15,20,0.85)` 的底色
+    /// 实色卡片底色 #0F0F14（Void token，不透明）
     const C_BG: u32 = 0x0014_0F0F;
     /// `rgba(255,255,255,0.06)` 压在底色上的结果
     const C_BORDER: u32 = 0x0022_1D1D;
     const C_TEXT: u32 = 0x00FA_F5F5;
     /// `rgba(255,255,255,0.35)` 压在底色上的结果（meta 行）
     const C_META: u32 = 0x0066_6363;
+    /// 眉标色：`C_TEXT` 55% 压在实色底色上的弱灰——亮于 meta 行、弱于主文
+    const C_BRAND: u32 = 0x0093_8E90;
+    /// 品牌眉标文案：产品名 + 组件名，与 macOS/Linux 通知标题的 nuphus-mcp 同源
+    const EYEBROW: &str = "Nuphus MCP";
     /// 相位色（主项目 dark）：running `#60a5fa` / done `#34d399` / error `#f87171`
     const A_RUNNING: u32 = 0x00FA_A560;
     const A_DONE: u32 = 0x0099_D334;
@@ -398,10 +408,10 @@ mod imp {
         let work = work_area();
         let work_w = work.right - work.left;
         let (head, tail) = split_head_tail(text);
-        let (font_text, font_meta) = hud_fonts();
+        let (font_text, font_meta, font_eyebrow) = hud_fonts();
 
-        let avail =
-            (CARD_MAX_W - (BAR_W + GAP_ICON_TEXT + ICON_BOX + GAP_ICON_TEXT + PAD_RIGHT)).max(60);
+        let chrome = BAR_W + GAP_ICON_TEXT + ICON_BOX + GAP_ICON_TEXT + PAD_RIGHT;
+        let avail = (CARD_MAX_W - chrome).max(60);
         let hdc = GetDC(hwnd);
         let head_w = measure(hdc, font_text, head, avail).min(avail);
         let tail_w = if tail.is_empty() {
@@ -412,10 +422,10 @@ mod imp {
         ReleaseDC(hwnd, hdc);
         let _ = DeleteObject(font_text);
         let _ = DeleteObject(font_meta);
+        let _ = DeleteObject(font_eyebrow);
 
         let content = head_w.max(tail_w);
-        let width = (BAR_W + GAP_ICON_TEXT + ICON_BOX + GAP_ICON_TEXT + content + PAD_RIGHT)
-            .clamp(CARD_MIN_W, CARD_MAX_W.min(work_w - MARGIN * 2));
+        let width = (chrome + content).clamp(CARD_MIN_W, CARD_MAX_W.min(work_w - MARGIN * 2));
         let x = work.right - width - MARGIN;
         let y = work.bottom - CARD_H - MARGIN;
         unsafe {
@@ -557,21 +567,39 @@ mod imp {
             let icon_y = rc.top + (CARD_H - ICON_BOX) / 2;
             draw_phase_icon(hdc, kind, icon_x, icon_y, accent);
 
-            // 两行文字：主文 12.5px / meta 10px（对齐 .hud-text + .hud-meta）
+            // 三行结构：品牌眉标 / 13.5px 主文 / 11px mono 次行（共用左对齐轴线）
             let (head, tail) = split_head_tail(&text);
-            let (font_text, font_meta) = hud_fonts();
+            let (font_text, font_meta, font_eyebrow) = hud_fonts();
             SetBkMode(hdc, TRANSPARENT);
             let text_left = icon_x + ICON_BOX + GAP_ICON_TEXT;
             let text_right = rc.right - PAD_RIGHT;
+
+            // 眉标：Nuphus MCP（10px 弱灰）——品牌即结构，钉在主文上方，不做右侧浮动字
+            let old_brow = SelectObject(hdc, font_eyebrow);
+            SetTextColor(hdc, COLORREF(C_BRAND));
+            let mut eyebrow_w: Vec<u16> = EYEBROW.encode_utf16().collect();
+            let mut eyebrow_rc = RECT {
+                left: text_left,
+                top: rc.top + 7,
+                right: text_right,
+                bottom: rc.top + 20,
+            };
+            DrawTextW(
+                hdc,
+                &mut eyebrow_w,
+                &mut eyebrow_rc,
+                DT_SINGLELINE | DT_TOP | DT_LEFT | DT_END_ELLIPSIS,
+            );
+            SelectObject(hdc, old_brow);
 
             let old = SelectObject(hdc, font_text);
             SetTextColor(hdc, COLORREF(C_TEXT));
             let mut head_w: Vec<u16> = head.encode_utf16().collect();
             let mut head_rc = RECT {
                 left: text_left,
-                top: rc.top + 9,
+                top: rc.top + 21,
                 right: text_right,
-                bottom: rc.top + 28,
+                bottom: rc.top + 39,
             };
             DrawTextW(
                 hdc,
@@ -587,9 +615,9 @@ mod imp {
                 let mut tail_w: Vec<u16> = tail.encode_utf16().collect();
                 let mut tail_rc = RECT {
                     left: text_left,
-                    top: rc.top + 29,
+                    top: rc.top + 40,
                     right: text_right,
-                    bottom: rc.top + 43,
+                    bottom: rc.top + 54,
                 };
                 DrawTextW(
                     hdc,
@@ -601,6 +629,7 @@ mod imp {
             }
             let _ = DeleteObject(font_text);
             let _ = DeleteObject(font_meta);
+            let _ = DeleteObject(font_eyebrow);
 
             // 执行中：底部 2px 渐变扫光（对齐主项目 .hud-progress + hudProgressSweep）
             if kind == HudKind::Start {
@@ -611,7 +640,7 @@ mod imp {
         }
     }
 
-    /// 相位图标：形状对齐主项目 HUD 的 SVG（转圈 / 对勾 / 感叹号），14px 画在 20px 盒中央
+    /// 相位图标：形状对齐主项目 HUD 的 SVG（转圈 / 对勾 / 感叹号），18px 画在 26px 盒中央
     unsafe fn draw_phase_icon(hdc: HDC, kind: HudKind, box_x: i32, box_y: i32, accent: u32) {
         unsafe {
             let x = box_x + (ICON_BOX - ICON_SIZE) / 2;
@@ -624,7 +653,7 @@ mod imp {
                 let old = SelectObject(hdc, pen);
                 let cx = (x + ICON_SIZE / 2) as f64;
                 let cy = (y + ICON_SIZE / 2) as f64;
-                let r = 5.0;
+                let r = 6.0;
                 let start = ((ANIM_TICK.load(Ordering::Acquire) as f64) * 30.0) % 360.0;
                 let pt = |deg: f64| -> (i32, i32) {
                     let a = deg.to_radians();
@@ -636,10 +665,10 @@ mod imp {
                 let (sx, sy) = pt(start);
                 let (ex, ey) = pt(start + 270.0);
                 let arc_rc = RECT {
-                    left: x + 1,
-                    top: y + 1,
-                    right: x + ICON_SIZE - 1,
-                    bottom: y + ICON_SIZE - 1,
+                    left: x + 2,
+                    top: y + 2,
+                    right: x + ICON_SIZE - 2,
+                    bottom: y + ICON_SIZE - 2,
                 };
                 let _ = Arc(
                     hdc,
@@ -662,7 +691,7 @@ mod imp {
             let fill = CreateSolidBrush(COLORREF(C_BG));
             let old_pen = SelectObject(hdc, ring_pen);
             let old_brush = SelectObject(hdc, fill);
-            let _ = Ellipse(hdc, x + 1, y + 1, x + ICON_SIZE - 1, y + ICON_SIZE - 1);
+            let _ = Ellipse(hdc, x + 2, y + 2, x + ICON_SIZE - 2, y + ICON_SIZE - 2);
             SelectObject(hdc, old_brush);
             SelectObject(hdc, old_pen);
             let _ = DeleteObject(fill);
@@ -673,20 +702,23 @@ mod imp {
             if kind == HudKind::Done {
                 // 对勾
                 let pts = [
-                    POINT { x: x + 4, y: y + 7 },
-                    POINT { x: x + 6, y: y + 9 },
+                    POINT { x: x + 5, y: y + 9 },
                     POINT {
-                        x: x + 10,
-                        y: y + 5,
+                        x: x + 7,
+                        y: y + 12,
+                    },
+                    POINT {
+                        x: x + 13,
+                        y: y + 6,
                     },
                 ];
                 let _ = Polyline(hdc, &pts);
             } else {
                 // 感叹号：竖线 + 点
-                let _ = MoveToEx(hdc, x + 7, y + 4, None);
-                let _ = LineTo(hdc, x + 7, y + 8);
-                let _ = MoveToEx(hdc, x + 7, y + 10, None);
-                let _ = LineTo(hdc, x + 7, y + 10);
+                let _ = MoveToEx(hdc, x + 9, y + 4, None);
+                let _ = LineTo(hdc, x + 9, y + 11);
+                let _ = MoveToEx(hdc, x + 9, y + 14, None);
+                let _ = LineTo(hdc, x + 9, y + 14);
             }
             SelectObject(hdc, old);
             let _ = DeleteObject(mark_pen);
@@ -713,7 +745,7 @@ mod imp {
             FillRect(hdc, &base_rc, base);
             let _ = DeleteObject(base);
 
-            let band = (w * 35 / 100).max(24);
+            let band = (w * 30 / 100).clamp(24, 44);
             let travel = w + band;
             let offset = ((ANIM_TICK.load(Ordering::Acquire) as i32) * 14) % travel;
             let start = x0 + offset - band;
@@ -749,11 +781,11 @@ mod imp {
         ch(0) | (ch(8) << 8) | (ch(16) << 16)
     }
 
-    /// 两行文字字体：主文 12.5px/500（Segoe UI）、meta 10px/400（等宽，对齐 --font-mono）
-    unsafe fn hud_fonts() -> (HFONT, HFONT) {
+    /// 三套字体：眉标 10px/500、主文 13.5px/500（Segoe UI）、meta 11px mono（Consolas）
+    unsafe fn hud_fonts() -> (HFONT, HFONT, HFONT) {
         unsafe {
             let text = CreateFontW(
-                -13,
+                -14,
                 0,
                 0,
                 0,
@@ -769,7 +801,7 @@ mod imp {
                 w!("Segoe UI"),
             );
             let meta = CreateFontW(
-                -10,
+                -11,
                 0,
                 0,
                 0,
@@ -784,7 +816,23 @@ mod imp {
                 (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
                 w!("Consolas"),
             );
-            (text, meta)
+            let eyebrow = CreateFontW(
+                -10,
+                0,
+                0,
+                0,
+                FW_MEDIUM.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                CLEARTYPE_QUALITY.0 as u32,
+                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                w!("Segoe UI"),
+            );
+            (text, meta, eyebrow)
         }
     }
 
