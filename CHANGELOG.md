@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-13
+
 ### Added
 
 - **`desktop_perceive` 新增 `capture_id` 防呆点击：`desktop_mouse` / `desktop_mouse_drag` 可用 `capture_id + element_id` 引用登记的元素中心。** 屏幕空间 perceive 运行登记进进程级 FIFO 注册表（保留最近 8 次，uuid v4），鼠标工具把 id 对解析成服务端登记的屏幕坐标后再作用；与裸 x/y 混用、只传一半、id 过期均得带恢复指引的明确报错，杜绝「图片坐标当屏幕坐标」类失误。裸 x/y 保留为旧接口。新增 4 项单测（注册解析 / 未知 id / 未知元素 / FIFO 逐出）。
