@@ -145,7 +145,11 @@ set NUPHUS_MCP_VISION_MODEL=claude-sonnet-4-5
 
 ### `desktop_perceive` — local OCR + YOLO models
 
-`desktop_perceive` runs PaddleOCR locally with ONNX Runtime. The first call
+`desktop_perceive` runs PaddleOCR locally with ONNX Runtime. A screen-space
+run (no `path`) additionally returns a `capture_id`; pass `capture_id` +
+`element_id` to `desktop_mouse` / `desktop_mouse_drag` to act on a registered
+element center without raw coordinates (only the last 8 captures are kept —
+re-run perceive if the id goes stale). The first call
 downloads the OCR models automatically into `%APPDATA%\Nuphus\models` (or
 `NUPHUS_MODELS_DIR` if set). Download sources: `hf-mirror.com/SWHL/RapidOCR`
 (det/rec ONNX) and `gitee.com/paddlepaddle/PaddleOCR` (char dictionary). If a
@@ -171,11 +175,24 @@ These two tools are designed to be used **as a pair**:
    vision LLM. It gives semantic understanding but **imprecise coordinates**.
 2. `desktop_perceive` — locate exact UI element coordinates (local OCR + YOLO).
    It returns precise `center` coordinates but **no semantic understanding**.
-3. Click using the `center` coordinate from `desktop_perceive` — never
-   coordinates guessed from `desktop_vision`.
+3. Click using `capture_id` + `element_id` from `desktop_perceive` — the server
+   then targets the registered element center directly (no image-vs-screen
+   coordinate mistakes). Raw `x`/`y` remain supported as the legacy interface;
+   `desktop_mouse_drag` accepts the same pairs for its two endpoints.
+   Never click coordinates guessed from `desktop_vision`.
 
 This mirrors the battle-tested flow in the Nuphus desktop app: *vision for
 semantics, perceive for precision*.
+
+### `desktop_vision` failure diagnostics
+
+When the vision API call fails, the returned error is **classified** into one
+of five kinds — `auth` / `billing` / `rate_limit` / `image_too_large` / `other`
+— and the copy states the cause plus the concrete way out (e.g. billing errors
+say "top up at the provider console", rate limits say "retry in a few tens of
+seconds"). Billing keywords (insufficient quota / balance / 余额不足 …) take
+precedence over HTTP 429, so OpenAI-style `insufficient_quota` responses are
+correctly reported as billing instead of a retryable rate limit.
 
 ---
 
@@ -411,21 +428,31 @@ fails: `isError: true` with a clear message and manual download instructions.
 
 ### desktop_mouse
 
-Mouse operations: `click` / `double_click` / `hover` / `scroll` / `move`
-require `(x, y)`. `position` is read-only: it returns the current cursor
-position without moving the mouse.
+Mouse operations: `click` / `double_click` / `hover` / `move` require
+coordinates — either raw screen `x`/`y`, or `capture_id` + `element_id` from a
+recent screen-space `desktop_perceive` (recommended: the server then acts on
+the registered element center, eliminating image-vs-screen coordinate
+mistakes). `position` is read-only: it returns the current cursor position
+without moving the mouse.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `action` | string | **yes** | - | One of `click`, `double_click`, `hover`, `scroll`, `position`, `move` |
-| `x` | integer | no | 0 | X coordinate |
-| `y` | integer | no | 0 | Y coordinate |
+| `x` | integer | no | 0 | Screen X coordinate (alternative to `capture_id`+`element_id`) |
+| `y` | integer | no | 0 | Screen Y coordinate (alternative to `capture_id`+`element_id`) |
+| `capture_id` | string | no | - | From a recent screen-space `desktop_perceive`; requires `element_id`; exclusive with `x`/`y` |
+| `element_id` | integer | no | - | Element id from the same `desktop_perceive` result; requires `capture_id` |
 | `button` | string | no | - | Mouse button for `click`: `left`, `right`, `middle` |
 | `clicks` | integer | no | 1 | Number of clicks (`click`) |
-| `direction` | string | no | - | Scroll direction for `scroll`: `up`, `down` |
+| `direction` | string | no | - | Scroll direction for `scroll`: `up`, `down`, `left`, `right` |
 | `amount` | integer | no | 3 | Scroll ticks for `scroll` |
 
-**Example — click**
+**Example — click via perceive capture (recommended)**
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_mouse","arguments":{"action":"click","capture_id":"0b6f…","element_id":7}}}
+```
+
+**Example — legacy raw coordinates**
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_mouse","arguments":{"action":"click","x":100,"y":200,"button":"left"}}}
 ```
@@ -440,17 +467,24 @@ position without moving the mouse.
 
 ### desktop_mouse_drag
 
-Drag the mouse from a start coordinate to an end coordinate (captcha sliders,
-slider validation, etc.).
+Drag the mouse from a start point to an end point (captcha sliders, slider
+validation, etc.). Each endpoint is either raw `x`/`y` or a
+`capture_id` + `element_id` pair from a recent screen-space `desktop_perceive`
+— never mixed within one endpoint or across endpoints.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `start_x` | integer | **yes** | - | Start X coordinate |
-| `start_y` | integer | **yes** | - | Start Y coordinate |
-| `end_x` | integer | **yes** | - | End X coordinate |
-| `end_y` | integer | **yes** | - | End Y coordinate |
+| `start_x` / `start_y` | integer | no | - | Start coordinates (alternative to the start capture pair) |
+| `end_x` / `end_y` | integer | no | - | End coordinates (alternative to the end capture pair) |
+| `start_capture_id` + `start_element_id` | string + integer | no | - | Registered perceive capture for the drag start |
+| `end_capture_id` + `end_element_id` | string + integer | no | - | Registered perceive capture for the drag end |
 
-**Example**
+**Example — capture-pair endpoints**
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_mouse_drag","arguments":{"start_capture_id":"0b6f…","start_element_id":3,"end_capture_id":"0b6f…","end_element_id":9}}}
+```
+
+**Example — legacy raw coordinates**
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_mouse_drag","arguments":{"start_x":50,"start_y":300,"end_x":350,"end_y":300}}}
 ```
@@ -849,11 +883,11 @@ the native-key path for terminals and canvas applications; unlike
 
 ### browser_scroll
 
-Scroll page up/down by N pixels.
+Scroll page up/down/left/right by N pixels.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `direction` | string | **yes** | - | Scroll direction: `up`, `down` |
+| `direction` | string | **yes** | - | Scroll direction: `up`, `down`, `left`, `right` |
 | `amount` | integer | no | `500` | Pixels to scroll |
 
 **Example**
@@ -865,7 +899,12 @@ Scroll page up/down by N pixels.
 
 ### browser_extract
 
-Extract readable text from the current page (strips nav/ads).
+Extract readable text from the current page, flattened to one line. Noise
+subtrees (`nav` / `aside` / `footer` / `script` / `style` / `noscript` / `svg`)
+are removed before reading, then 5 pickers are tried in order — `article` →
+`main` → `[role=main]` → `[itemprop=mainContent]` → `[class*="content"]` →
+`body` — and the first **non-empty** match wins, so SPA shells with an empty
+`<article>` degrade to `body` instead of returning nothing.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
@@ -880,17 +919,19 @@ Extract readable text from the current page (strips nav/ads).
 
 ### browser_screenshot
 
-Screenshot the current browser page.
+Screenshot the current browser page. With `path` the PNG is saved to disk
+(path validated, parent directory must exist); without `path` a base64 data
+URI is returned for inline reading.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `path` | string | **yes** | - | Existing-parent save path for the PNG file |
+| `path` | string | no | - | Save path for the PNG; omit to get a base64 data URI |
 
 **Example**
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{"path":"page.png"}}}
 ```
-**Returns** the saved path and PNG byte count.
+**Returns** the saved path and PNG byte count (or a `data:image/png;base64,…` URI when `path` is omitted).
 
 ---
 

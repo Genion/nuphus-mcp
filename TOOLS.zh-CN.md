@@ -136,7 +136,10 @@ set NUPHUS_MCP_VISION_MODEL=claude-sonnet-4-5
 
 ### `desktop_perceive` — 本地 OCR + YOLO 模型
 
-`desktop_perceive` 用 ONNX Runtime 本地运行 PaddleOCR。首次调用自动下载 OCR
+`desktop_perceive` 用 ONNX Runtime 本地运行 PaddleOCR。屏幕空间运行
+（不传 `path`）会额外返回 `capture_id`——把 `capture_id` + `element_id` 传给
+`desktop_mouse` / `desktop_mouse_drag` 即可直接作用于登记的元素中心，无需裸
+坐标（仅保留最近 8 次捕获，id 过期就重跑一次 perceive）。首次调用自动下载 OCR
 模型到 `%APPDATA%\Nuphus\models`（或 `NUPHUS_MODELS_DIR`）。下载源：
 `hf-mirror.com/SWHL/RapidOCR`（det/rec ONNX）与 `gitee.com/paddlepaddle/PaddleOCR`
 （字符字典）。下载失败时工具返回明确错误并附手动下载指引。
@@ -158,10 +161,21 @@ set NUPHUS_MCP_VISION_MODEL=claude-sonnet-4-5
    提供语义理解但**坐标不精确**。
 2. `desktop_perceive` — 用本地 OCR + YOLO 定位 UI 元素的精确坐标，
    返回精确的 `center` 坐标但**无语义理解**。
-3. 点击时使用 `desktop_perceive` 返回的 `center` 坐标 —— 绝不用
-   `desktop_vision` 估算的坐标。
+3. 点击时优先传 `desktop_perceive` 返回的 `capture_id` + `element_id` ——
+   服务端直接点击登记的元素中心，杜绝「图片坐标当屏幕坐标」的失误。
+   裸 `x`/`y` 仍作为旧接口支持；`desktop_mouse_drag` 两个端点同样支持
+   capture 对。绝不用 `desktop_vision` 估算的坐标点击。
 
 这正是 Nuphus 桌面应用实战验证过的流程：*vision 理解语义，perceive 提供精度*。
+
+### `desktop_vision` 失败诊断
+
+视觉 API 调用失败时，返回的错误会被**分类**为五类之一 —— `auth` / `billing` /
+`rate_limit` / `image_too_large` / `other` —— 文案写明失败原因与具体出路
+（计费错误指引「到服务商控制台充值」，限流提示「稍等数十秒重试」）。
+计费类关键词（余额不足 / 配额耗尽 / insufficient_quota …）优先于 HTTP 429
+判定，因此 OpenAI 风格的 `insufficient_quota` 响应会被正确归为计费，
+而不是可重试的限流。
 
 ---
 
@@ -377,20 +391,29 @@ set NUPHUS_MCP_VISION_MODEL=claude-sonnet-4-5
 
 ### desktop_mouse
 
-鼠标操作：`click` / `double_click` / `hover` / `scroll` / `move` 需要
-`(x, y)`。`position` 为只读：返回当前光标位置，不移动光标。
+鼠标操作：`click` / `double_click` / `hover` / `move` 需要坐标——优先传
+`capture_id` + `element_id`（来自最近的屏幕空间 `desktop_perceive`，服务端
+直接作用于登记的元素中心，杜绝图片坐标当屏幕坐标的失误），旧接口裸屏幕
+`x`/`y` 仍支持。`position` 为只读：返回当前光标位置，不移动光标。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | `action` | string | **是** | - | `click`、`double_click`、`hover`、`scroll`、`position`、`move` 之一 |
-| `x` | integer | 否 | 0 | X 坐标 |
-| `y` | integer | 否 | 0 | Y 坐标 |
+| `x` | integer | 否 | 0 | 屏幕绝对 X 坐标（与 `capture_id`+`element_id` 二选一） |
+| `y` | integer | 否 | 0 | 屏幕绝对 Y 坐标（与 `capture_id`+`element_id` 二选一） |
+| `capture_id` | string | 否 | - | 来自最近一次屏幕空间 `desktop_perceive`；须与 `element_id` 成对；与 `x`/`y` 互斥 |
+| `element_id` | integer | 否 | - | 同次 `desktop_perceive` 结果里的元素 id；须与 `capture_id` 成对 |
 | `button` | string | 否 | - | `click` 的按键：`left`、`right`、`middle` |
 | `clicks` | integer | 否 | 1 | 点击次数（`click`） |
-| `direction` | string | 否 | - | `scroll` 方向：`up`、`down` |
+| `direction` | string | 否 | - | `scroll` 方向：`up`、`down`、`left`、`right` |
 | `amount` | integer | 否 | 3 | `scroll` 滚动格数 |
 
-**示例 — 点击**
+**示例 — 经 perceive 捕获点击（推荐）**
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_mouse","arguments":{"action":"click","capture_id":"0b6f…","element_id":7}}}
+```
+
+**示例 — 旧接口裸坐标**
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_mouse","arguments":{"action":"click","x":100,"y":200,"button":"left"}}}
 ```
@@ -405,16 +428,22 @@ set NUPHUS_MCP_VISION_MODEL=claude-sonnet-4-5
 
 ### desktop_mouse_drag
 
-从起点坐标拖拽鼠标到终点坐标（验证码滑块、滑块验证等场景）。
+从起点拖拽鼠标到终点（验证码滑块、滑块验证等场景）。每个端点二选一：
+裸 `x`/`y`，或 `capture_id` + `element_id` 捕获对——端点内、端点间均不得混用。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `start_x` | integer | **是** | - | 起点 X 坐标 |
-| `start_y` | integer | **是** | - | 起点 Y 坐标 |
-| `end_x` | integer | **是** | - | 终点 X 坐标 |
-| `end_y` | integer | **是** | - | 终点 Y 坐标 |
+| `start_x` / `start_y` | integer | 否 | - | 起点坐标（与起点捕获对二选一） |
+| `end_x` / `end_y` | integer | 否 | - | 终点坐标（与终点捕获对二选一） |
+| `start_capture_id` + `start_element_id` | string + integer | 否 | - | 起点的 perceive 捕获对 |
+| `end_capture_id` + `end_element_id` | string + integer | 否 | - | 终点的 perceive 捕获对 |
 
-**示例**
+**示例 — 捕获对端点**
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_mouse_drag","arguments":{"start_capture_id":"0b6f…","start_element_id":3,"end_capture_id":"0b6f…","end_element_id":9}}}
+```
+
+**示例 — 旧接口裸坐标**
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_mouse_drag","arguments":{"start_x":50,"start_y":300,"end_x":350,"end_y":300}}}
 ```
@@ -424,13 +453,13 @@ set NUPHUS_MCP_VISION_MODEL=claude-sonnet-4-5
 ### desktop_input
 
 向窗口输入文本（自动 UTF-8 编码），可选附带一个后续按键——原子操作。
-普通文本直接输入；超过 500 字符用剪贴板。操作前需先通过
-`desktop_window_activate` 激活目标窗口。
+普通文本直接输入；超过 500 字符用剪贴板。`hwnd` 省略时作用于当前前台窗口
+（请先用 `desktop_window_activate` 激活正确窗口）。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | `mode` | string | **是** | - | `type`：输入文本；`hotkey`：仅按键 |
-| `hwnd` | integer | **是** | - | 目标窗口句柄（来自 `desktop_windows_list`） |
+| `hwnd` | integer | 否 | - | 目标窗口句柄（来自 `desktop_windows_list`）；省略则用当前前台窗口 |
 | `text` | string | 否 | - | 要输入的文本（`mode=type` 必填） |
 | `send` | string | 否 | `"enter"` | 输入后发送的按键：`"enter"`（默认）、`"ctrl+enter"`、`"tab"`、或 `"none"` 跳过 |
 | `keys` | array<string> | 否 | - | 要按下的组合键（`mode=hotkey` 必填） |
@@ -791,11 +820,11 @@ CSS 选择器路径会在点击前自动等待元素出现并可见（最多 5 �
 
 ### browser_scroll
 
-按 N 像素向上/向下滚动页面。
+按 N 像素向上/向下/向左/向右滚动页面。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `direction` | string | **是** | - | 滚动方向：`up`、`down` |
+| `direction` | string | **是** | - | 滚动方向：`up`、`down`、`left`、`right` |
 | `amount` | integer | 否 | `500` | 滚动像素数 |
 
 **示例**
@@ -807,7 +836,11 @@ CSS 选择器路径会在点击前自动等待元素出现并可见（最多 5 �
 
 ### browser_extract
 
-提取当前页面可读文本（去除导航/广告）。
+提取当前页面可读文本（压平为单行）。读取前先移除噪声子树（`nav` / `aside` /
+`footer` / `script` / `style` / `noscript` / `svg`），然后按顺序尝试 5 个
+选择器——`article` → `main` → `[role=main]` → `[itemprop=mainContent]` →
+`[class*="content"]` → `body`——**首个非空命中生效**：空 `<article>`（SPA
+骨架屏）会降级到 `body`，不再返回空结果。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
@@ -822,17 +855,18 @@ CSS 选择器路径会在点击前自动等待元素出现并可见（最多 5 �
 
 ### browser_screenshot
 
-截取当前浏览器页面。
+截取当前浏览器页面。传 `path` 时 PNG 存盘（路径校验，父目录须存在）；
+省略 `path` 时返回 base64 data URI 可内联读图。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `path` | string | **是** | - | 父目录已存在的 PNG 保存路径 |
+| `path` | string | 否 | - | PNG 保存路径；省略则返回 base64 data URI |
 
 **示例**
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{"path":"page.png"}}}
 ```
-**返回** 保存路径和 PNG 字节数。
+**返回** 保存路径和 PNG 字节数（省略 `path` 时为 `data:image/png;base64,…` URI）。
 
 ---
 

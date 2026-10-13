@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`desktop_perceive` 新增 `capture_id` 防呆点击：`desktop_mouse` / `desktop_mouse_drag` 可用 `capture_id + element_id` 引用登记的元素中心。** 屏幕空间 perceive 运行登记进进程级 FIFO 注册表（保留最近 8 次，uuid v4），鼠标工具把 id 对解析成服务端登记的屏幕坐标后再作用；与裸 x/y 混用、只传一半、id 过期均得带恢复指引的明确报错，杜绝「图片坐标当屏幕坐标」类失误。裸 x/y 保留为旧接口。新增 4 项单测（注册解析 / 未知 id / 未知元素 / FIFO 逐出）。
+- **新增 `scripts/schema_drift_check.py`：本仓库与 Nuphus 主项目工具 schema 的结构性漂移检查。** 工具名 / required / 属性名视为契约逐项比对（描述措辞允许有意分叉；产品级分叉进白名单且逐条带理由）。当前 44 个共享工具零结构漂移；该检查也挖出了本次放开的四向滚动等真实能力分叉。
+
+### Changed
+
+- **Windows 执行 HUD 有了品牌标识，并改为实色卡片 + 三行结构。** 右下角状态胶囊从半透明两行（主文 + mono 次行）重做为**实色不透明三行**：`Nuphus MCP` 品牌眉标（10px 弱灰）钉在主文上方，与工具名（13.5px）、mono 次行（11px）共用左对齐轴线；卡片 alpha 217 → 255，不再叠桌面，小字不再发虚。品牌做眉标而非右侧浮动字标——与主文/次行同轴，不破坏两行信息的层级。相位图标随卡片放大到 18px，几何与描边同步重算。macOS/Linux 系统通知标题本就是 `nuphus-mcp`，此番后三端皆有品牌。新增 `cargo run -p desktop-api --example hud_preview`：依次预览执行中 / 完成 / 失败三态，供样式迭代肉眼验收。
+- **`desktop_vision` 失败文案升级为分类诊断（auth / billing / rate_limit / image_too_large / other 五类）。** 文案写明失败原因与出路（计费 → 到服务商控制台充值，限流 → 稍等重试，密钥 → 检查 `NUPHUS_MCP_VISION_API_KEY`）；计费关键词（余额不足 / 配额耗尽 / insufficient_quota …）优先于 HTTP 429 判定，OpenAI 风格 `insufficient_quota` 的 429 响应被正确归为计费而非可重试限流；文案内嵌判别短语，分类器往返防劫持（敌意 body 单测覆盖）。
+- **`browser_extract` 重写：噪声子树预移除 + 五级主内容选择器 + 非空命中降级。** 读取前移除 nav / aside / footer / script / style / noscript / svg；选择器由四级升为五级（新增 `[role=main]`、`[itemprop=mainContent]`）；首个**非空**命中生效——修复「命中 `<article>` 但为空 SPA 骨架 → 返回无内容」的真实 bug。工具描述同步与实现对齐，不再声称未实现的「strips nav/ads」。
+- **滚动放开四方向：`desktop_mouse` 的 scroll 支持 `left` / `right`**（Win32 `MOUSEEVENTF_HWHEEL`，自主项目 desktop-api 移植）**，`browser_scroll` schema 同步放开 CDP 层本已实现的四方向**；负数滚动量现明确报错。此前 schema 把已实现能力锁死在两方向。
+- **`browser_screenshot` 双模式：`path` 省略时返回 base64 data URI 供内联读图**（client 层早有该回退，执行器此前人为拒绝空 path）；**`desktop_input` 的 `hwnd` 改为可选**，省略时作用于当前前台窗口（运行时行为早已存在，schema 必填约束与之自相矛盾）；`desktop_mouse_drag` 的 required 相应清空（捕获对 / 裸坐标按端点二选一）。
+
 ## [0.3.2] - 2026-10-11
 
 ### Fixed
