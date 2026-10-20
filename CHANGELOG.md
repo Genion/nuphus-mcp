@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rustls` upgraded to 0.23.46** — clears four advisories (RUSTSEC-2026-0346 … -0349: TLS secrets exposed by `Debug` impls of client session values, buffered application data sent to the outer server after ECH rejection, classical key-exchange downgrade via unauthenticated ServerHello, and a pre-authentication 1 GiB Brotli certificate-decompression allocation). Lock-only bump — `rustls` is a transitive dep via `reqwest → hyper-rustls → tokio-rustls`; `cargo audit` is unblocked again.
+
 ## [0.3.3] - 2026-10-13
 
 ### Added
