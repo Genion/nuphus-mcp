@@ -11,16 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`desktop_perceive` 新增 `capture_id` 防呆点击：`desktop_mouse` / `desktop_mouse_drag` 可用 `capture_id + element_id` 引用登记的元素中心。** 屏幕空间 perceive 运行登记进进程级 FIFO 注册表（保留最近 8 次，uuid v4），鼠标工具把 id 对解析成服务端登记的屏幕坐标后再作用；与裸 x/y 混用、只传一半、id 过期均得带恢复指引的明确报错，杜绝「图片坐标当屏幕坐标」类失误。裸 x/y 保留为旧接口。新增 4 项单测（注册解析 / 未知 id / 未知元素 / FIFO 逐出）。
-- **新增 `scripts/schema_drift_check.py`：本仓库与 Nuphus 主项目工具 schema 的结构性漂移检查。** 工具名 / required / 属性名视为契约逐项比对（描述措辞允许有意分叉；产品级分叉进白名单且逐条带理由）。当前 44 个共享工具零结构漂移；该检查也挖出了本次放开的四向滚动等真实能力分叉。
+- **`desktop_perceive` gains `capture_id` fool-proof clicking: `desktop_mouse` / `desktop_mouse_drag` can address a registered element center via `capture_id + element_id`.** Each screen-space perceive run registers its elements in a process-level FIFO registry (last 8 kept, uuid v4); the mouse tools resolve the id pair against the server-registered screen coordinates before acting. Mixing with bare x/y, passing only one half of the pair, or using an expired id all fail with an explicit, recovery-oriented error instead of the "image coordinates treated as screen coordinates" class of mistake. Bare x/y stays as the legacy interface. 4 new unit tests (registry resolution / unknown capture id / unknown element id / FIFO eviction).
+- **New `scripts/schema_drift_check.py`: structural drift check between this repo and the Nuphus main project's tool schemas.** Tool names / required flags / property names are compared item by item as contracts (intended wording divergence in descriptions is allowed; product-level gaps go into an allowlist with a documented reason each). All 44 shared tools currently show zero structural drift; the check also surfaced real capability gaps such as the four-way scrolling unlocked in this release.
 
 ### Changed
 
-- **Windows 执行 HUD 有了品牌标识，并改为实色卡片 + 三行结构。** 右下角状态胶囊从半透明两行（主文 + mono 次行）重做为**实色不透明三行**：`Nuphus MCP` 品牌眉标（10px 弱灰）钉在主文上方，与工具名（13.5px）、mono 次行（11px）共用左对齐轴线；卡片 alpha 217 → 255，不再叠桌面，小字不再发虚。品牌做眉标而非右侧浮动字标——与主文/次行同轴，不破坏两行信息的层级。相位图标随卡片放大到 18px，几何与描边同步重算。macOS/Linux 系统通知标题本就是 `nuphus-mcp`，此番后三端皆有品牌。新增 `cargo run -p desktop-api --example hud_preview`：依次预览执行中 / 完成 / 失败三态，供样式迭代肉眼验收。
-- **`desktop_vision` 失败文案升级为分类诊断（auth / billing / rate_limit / image_too_large / other 五类）。** 文案写明失败原因与出路（计费 → 到服务商控制台充值，限流 → 稍等重试，密钥 → 检查 `NUPHUS_MCP_VISION_API_KEY`）；计费关键词（余额不足 / 配额耗尽 / insufficient_quota …）优先于 HTTP 429 判定，OpenAI 风格 `insufficient_quota` 的 429 响应被正确归为计费而非可重试限流；文案内嵌判别短语，分类器往返防劫持（敌意 body 单测覆盖）。
-- **`browser_extract` 重写：噪声子树预移除 + 五级主内容选择器 + 非空命中降级。** 读取前移除 nav / aside / footer / script / style / noscript / svg；选择器由四级升为五级（新增 `[role=main]`、`[itemprop=mainContent]`）；首个**非空**命中生效——修复「命中 `<article>` 但为空 SPA 骨架 → 返回无内容」的真实 bug。工具描述同步与实现对齐，不再声称未实现的「strips nav/ads」。
-- **滚动放开四方向：`desktop_mouse` 的 scroll 支持 `left` / `right`**（Win32 `MOUSEEVENTF_HWHEEL`，自主项目 desktop-api 移植）**，`browser_scroll` schema 同步放开 CDP 层本已实现的四方向**；负数滚动量现明确报错。此前 schema 把已实现能力锁死在两方向。
-- **`browser_screenshot` 双模式：`path` 省略时返回 base64 data URI 供内联读图**（client 层早有该回退，执行器此前人为拒绝空 path）；**`desktop_input` 的 `hwnd` 改为可选**，省略时作用于当前前台窗口（运行时行为早已存在，schema 必填约束与之自相矛盾）；`desktop_mouse_drag` 的 required 相应清空（捕获对 / 裸坐标按端点二选一）。
+- **The Windows execution HUD gets a brand mark and switches to an opaque card with a three-row layout.** The bottom-right status capsule is remade from a translucent two-row form (main line + mono subline) into an **opaque solid three-row card**: a 10px faint-gray `Nuphus MCP` brand eyebrow sits above the main line, sharing a left-aligned axis with the tool name (13.5px) and the mono subline (11px); card alpha goes 217 → 255, so the desktop no longer shows through and the small text no longer blurs. The brand is an eyebrow rather than a floating label on the right — one axis with the main/sub lines, preserving the two-row information hierarchy. The phase icon scales up to 18px with the card, and its geometry and stroke are recomputed to match. macOS/Linux system notifications already used `nuphus-mcp` as the title, so all three platforms now carry the brand. New `cargo run -p desktop-api --example hud_preview` renders the running / done / failed states in sequence for eyeball verification while iterating on the style.
+- **`desktop_vision` failures are upgraded to classified diagnostics (five classes: auth / billing / rate_limit / image_too_large / other).** The message states the cause and the way out (billing → top up at the provider console, rate limit → retry in a few tens of seconds, keys → check `NUPHUS_MCP_VISION_API_KEY`); billing keywords (insufficient balance / quota exhausted / insufficient_quota …) take precedence over the HTTP 429 verdict, and OpenAI-style `insufficient_quota` 429 responses are correctly classified as billing rather than a retryable rate limit. Discriminating phrases are embedded in the copy and the classifier round-trips them against tampering (covered by adversarial-body unit tests).
+- **`browser_extract` rewritten: noise-subtree pre-removal + five-tier main-content selectors + empty-hit degradation.** nav / aside / footer / script / style / noscript / svg subtrees are removed before reading; the selector ladder goes from four tiers to five (adding `[role=main]`, `[itemprop=mainContent]`); the first **non-empty** hit wins — fixing the real bug where matching `<article>` but landing on an empty SPA skeleton returned no content. Tool descriptions are aligned with the implementation and no longer claim an unimplemented "strips nav/ads".
+- **Scrolling unlocks all four directions: `desktop_mouse` scroll now supports `left` / `right`** (Win32 `MOUSEEVENTF_HWHEEL`, ported from the main project's desktop-api), **and the `browser_scroll` schema unlocks the four-way scrolling the CDP layer already implemented**; negative scroll amounts now fail explicitly. Previously the schemas locked already-implemented capabilities to two directions.
+- **`browser_screenshot` dual mode: omitting `path` returns a base64 data URI for inline image reading** (the client layer always had this fallback; the executor previously refused an empty path by policy); **`desktop_input`'s `hwnd` becomes optional** — when omitted it acts on the current foreground window (that runtime behavior has long existed; the schema's required constraint contradicted it); `desktop_mouse_drag`'s required list is cleared accordingly (capture pair / bare coordinates chosen by the two endpoints).
 
 ## [0.3.2] - 2026-10-11
 
@@ -105,13 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **执行 HUD 视觉重构**：Windows 端由「右下角黑色文字浮条」改为与主项目 HUD 同源的直角状态卡片
-  —— 3px 相位色条 + 14px 相位图标（转圈 / 对勾 / 感叹号）+ 12.5px 主文与 10px mono 次行
-  + 执行中底部 2px 渐变扫光 + 相位色辉光描边。不再出现类似「告警条 / 全宽横幅」的形态。
-- **HUD 锚点改用工作区**：以 `SPI_GETWORKAREA` 取主显示器工作区右下角定位，避免与任务栏 /
-  托盘区重叠（原先按整屏定位会压住任务栏）。
-- **状态图标改由 HUD 自绘**：Agent 侧不再拼接 `▶ ✓ ⚠ ✗` 字形；`HudKind` 新增 `Fail`
-  变体（失败态使用 error 相位色），macOS / Linux 的完成态通知行为不变。
+- **Execution HUD visual redesign** — the Windows side changes from a "black text bar at the bottom-right corner" to a squared status card derived from the main project's HUD: a 3px phase color strip + a 14px phase icon (spinner / check / exclamation) + a 12.5px main line and a 10px mono subline + a 2px gradient sweep along the bottom while running + a phase-color glow stroke. No more "alert bar / full-width banner" shape.
+- **The HUD anchors to the workspace** — it is positioned at the bottom-right of the primary display's work area via `SPI_GETWORKAREA`, so it no longer overlaps the taskbar / tray area (fullscreen anchoring used to cover the taskbar).
+- **Status icons are drawn by the HUD itself** — the agent no longer appends `▶ ✓ ⚠ ✗` glyphs; `HudKind` gains a `Fail` variant (the fail state uses the error phase color), and the macOS / Linux completion-notification behavior is unchanged.
 
 ## [0.2.2] - 2026-08-30
 
