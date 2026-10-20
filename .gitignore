@@ -38,3 +38,8 @@ mcp_drive_stderr.log
 
 # Nuphus runtime working dir (memory journals, temp logs)
 .nuphus/
+
+# Internal design drafts — local only, never commit
+/design/
+/docs/design/
+video/
